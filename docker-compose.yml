@@ -1,0 +1,29 @@
+# Optional convenience: a PostgreSQL matching what the app expects.
+#
+# The application itself is not tied to Docker in any way - it talks to whatever
+# DATABASE_URL points at. This file exists so `docker compose up -d` gives a
+# reviewer a working database in one command.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ops-erp-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ops_erp
+    ports:
+      - '5432:5432'
+    volumes:
+      - ops-erp-data:/var/lib/postgresql/data
+      # Creates the separate database the test suite wipes on every run.
+      - ./scripts/init-test-db.sql:/docker-entrypoint-initdb.d/10-test-db.sql:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d ops_erp']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  ops-erp-data:
