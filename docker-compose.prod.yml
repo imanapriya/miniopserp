@@ -1,0 +1,107 @@
+# ── Mini Ops ERP — Full Production Stack ──────────────────────────────────────
+#
+# Usage:
+#   cp .env.production.example .env.production
+#   # Fill in all values in .env.production
+#   docker compose -f docker-compose.prod.yml --env-file .env.production up -d
+#
+# What this starts:
+#   postgres   PostgreSQL 16 with a persistent named volume
+#   backend    NestJS API (auto-runs migrations on startup)
+#   frontend   React app served by nginx, proxies /api → backend
+#
+# The only port exposed to the host is 80 (frontend + API proxy).
+# Everything else is on the internal `erp-net` network.
+# ──────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Database ───────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: ops-erp-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - ops-erp-prod-data:/var/lib/postgresql/data
+      - ./scripts/init-test-db.sql:/docker-entrypoint-initdb.d/10-test-db.sql:ro
+    networks:
+      - erp-net
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ── Backend ────────────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ops-erp-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public
+      DATABASE_SSL: "false"        # SSL is handled inside Docker network; set true for external DB
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-8h}
+      BCRYPT_ROUNDS: ${BCRYPT_ROUNDS:-10}
+      PORT: 3000
+      CORS_ORIGINS: ${CORS_ORIGINS}
+    networks:
+      - erp-net
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/api/health || exit 1']
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
+
+  # ── Migration runner (one-shot, exits after running) ───────────────────────
+  migrate:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ops-erp-migrate
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public
+      DATABASE_SSL: "false"
+    command: ["node", "-e", "const { DataSource } = require('typeorm'); const { buildDataSourceOptions } = require('./dist/database/data-source'); const ds = new DataSource(buildDataSourceOptions()); ds.initialize().then(() => ds.runMigrations()).then(() => { console.log('Migrations complete'); process.exit(0); }).catch(e => { console.error(e.message); process.exit(1); });"]
+    networks:
+      - erp-net
+
+  # ── Frontend (nginx serving React + proxying /api) ─────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: /api
+    container_name: ops-erp-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - '8080:80'
+    networks:
+      - erp-net
+
+volumes:
+  ops-erp-prod-data:
+
+networks:
+  erp-net:
+    driver: bridge

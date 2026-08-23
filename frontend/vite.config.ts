@@ -20,6 +20,6 @@ export default defineConfig(({ mode }) => {
         '/api': { target, changeOrigin: true },
       },
     },
-    build: { outDir: 'dist', sourcemap: true },
+    build: { outDir: 'dist', sourcemap: 'hidden' },
   };
 });
